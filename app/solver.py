@@ -29,16 +29,15 @@ class Solution:
     choices: tuple[Choice, ...]
 
 
-def find_best_solution(positions: Sequence[Position]) -> Solution | None:
-    """搜索所有符合格式与校验式的组合，返回最优解；无合法组合返回 None。
+def _iter_solutions(positions: Sequence[Position]) -> list[Solution]:
+    """枚举所有合法组合并按既有排名规则排序（总分降序、编码字典序）。
 
-    结果只取决于候选集合本身：按所选候选置信度之和降序取胜，同分
-    取完整编码字典序最小者，与候选在请求中的排列次序无关。
+    排序只依赖总分与编码，因此候选在请求中的排列次序不影响结果。
     """
     check_confidence = {c.char: c.confidence for c in positions[CHECK_POSITION].candidates}
     pools = [tuple(position.candidates) for position in positions[:CHECK_POSITION]]
 
-    best: Solution | None = None
+    solutions: list[Solution] = []
     for combo in itertools.product(*pools):
         chars = tuple(candidate.char for candidate in combo)
         digits = [int(ch) for ch in chars[DATA_DIGIT_SLICE]]
@@ -52,7 +51,23 @@ def find_best_solution(positions: Sequence[Position]) -> Solution | None:
             Choice(position=index, char=candidate.char, confidence=candidate.confidence)
             for index, candidate in enumerate(combo)
         ) + (Choice(position=CHECK_POSITION, char=check_char, confidence=confidence),)
-        solution = Solution(code=code, total_score=total, choices=choices)
-        if best is None or rank_key(total, code) < rank_key(best.total_score, best.code):
-            best = solution
-    return best
+        solutions.append(Solution(code=code, total_score=total, choices=choices))
+    solutions.sort(key=lambda solution: rank_key(solution.total_score, solution.code))
+    return solutions
+
+
+def find_ranked_solutions(
+    positions: Sequence[Position], limit: int
+) -> list[Solution]:
+    """返回至多 ``limit`` 个按排名规则排好序的合法结果；无合法组合返回空列表。"""
+    return _iter_solutions(positions)[:limit]
+
+
+def find_best_solution(positions: Sequence[Position]) -> Solution | None:
+    """搜索所有符合格式与校验式的组合，返回最优解；无合法组合返回 None。
+
+    结果只取决于候选集合本身：按所选候选置信度之和降序取胜，同分
+    取完整编码字典序最小者，与候选在请求中的排列次序无关。
+    """
+    solutions = find_ranked_solutions(positions, 1)
+    return solutions[0] if solutions else None

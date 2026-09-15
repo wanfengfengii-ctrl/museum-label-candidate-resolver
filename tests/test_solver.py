@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 
 from app.schemas import RecoverRequest
-from app.solver import Solution, find_best_solution
+from app.solver import Solution, find_best_solution, find_ranked_solutions
 from tests.conftest import EXPECTED_CODE, EXPECTED_TOTAL_SCORE
 
 
@@ -58,3 +58,40 @@ def test_high_confidence_decoy_check_digit_is_ignored(payload: dict) -> None:
     solution = _solve(payload)
     assert solution is not None
     assert solution.choices[9].char == "9"
+
+
+def test_ranked_solutions_are_ordered_by_score_then_code(payload: dict) -> None:
+    request = RecoverRequest.model_validate(payload)
+    ranked = find_ranked_solutions(request.positions, 4)
+    assert len(ranked) == 4
+    assert ranked[0] == find_best_solution(request.positions)
+    # 总分严格降序；编码合法；同分时字典序升序。
+    for earlier, later in zip(ranked, ranked[1:]):
+        assert earlier.total_score > later.total_score
+        assert (-earlier.total_score, earlier.code) < (-later.total_score, later.code)
+    assert all(solution.code for solution in ranked)
+
+
+def test_ranked_solutions_truncates_when_fewer_legal_results(payload: dict) -> None:
+    reduced = copy.deepcopy(payload)
+    # 固定前两位后只剩 2 个数据数字可变，合法结果不足四个。
+    reduced["positions"][0]["candidates"] = [{"char": "A", "confidence": 90}]
+    request = RecoverRequest.model_validate(reduced)
+    ranked = find_ranked_solutions(request.positions, 4)
+    assert [solution.code for solution in ranked] == ["AC13567899", "AD13567899"]
+
+
+def test_ranked_solutions_limit_zero_returns_empty(payload: dict) -> None:
+    request = RecoverRequest.model_validate(payload)
+    assert find_ranked_solutions(request.positions, 0) == []
+
+
+def test_ranked_solutions_stable_under_candidate_order(payload: dict) -> None:
+    shuffled = copy.deepcopy(payload)
+    for position in shuffled["positions"]:
+        position["candidates"].reverse()
+    request = RecoverRequest.model_validate(payload)
+    shuffled_request = RecoverRequest.model_validate(shuffled)
+    assert find_ranked_solutions(request.positions, 4) == find_ranked_solutions(
+        shuffled_request.positions, 4
+    )

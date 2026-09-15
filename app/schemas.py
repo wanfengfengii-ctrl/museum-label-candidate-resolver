@@ -17,6 +17,8 @@ MIN_CONFIDENCE = 0
 MAX_CONFIDENCE = 100
 MIN_CANDIDATES = 1
 MAX_CANDIDATES = 3
+MIN_ALTERNATIVE_LIMIT = 0
+MAX_ALTERNATIVE_LIMIT = 4
 
 Confidence = Annotated[
     int, Field(strict=True, ge=MIN_CONFIDENCE, le=MAX_CONFIDENCE)
@@ -52,11 +54,20 @@ class Position(BaseModel):
 
 
 class RecoverRequest(BaseModel):
-    """恢复请求：固定十个位置。"""
+    """恢复请求：固定十个位置，可选备选数量上限。"""
 
     model_config = ConfigDict(extra="forbid")
 
     positions: list[Position] = Field(min_length=CODE_LENGTH, max_length=CODE_LENGTH)
+    alternative_limit: Annotated[
+        int,
+        Field(
+            default=MIN_ALTERNATIVE_LIMIT,
+            ge=MIN_ALTERNATIVE_LIMIT,
+            le=MAX_ALTERNATIVE_LIMIT,
+            strict=True,
+        ),
+    ] = MIN_ALTERNATIVE_LIMIT
 
     @model_validator(mode="after")
     def _check_character_classes(self) -> RecoverRequest:
@@ -84,9 +95,19 @@ class ChoiceOut(BaseModel):
     confidence: int
 
 
+class AlternativeOut(BaseModel):
+    """备选恢复结果：编码、总分、逐位选择及相对首选的分差。"""
+
+    code: str
+    total_score: int
+    score_gap: int
+    choices: list[ChoiceOut]
+
+
 class RecoverResponse(BaseModel):
-    """恢复结果：编码、总分和逐位选择。"""
+    """恢复结果：编码、总分和逐位选择；请求备选时附加 alternatives。"""
 
     code: str
     total_score: int
     choices: list[ChoiceOut]
+    alternatives: list[AlternativeOut] | None = None

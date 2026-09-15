@@ -119,6 +119,69 @@ def check_no_valid_combination() -> None:
     assert body["detail"][0]["reason"], "missing reason in error detail"
 
 
+def check_default_response_has_no_alternatives() -> None:
+    # 未传 alternative_limit 时响应须与旧版完全一致：不含 alternatives 字段。
+    status, body = request("POST", "/recover", valid_payload())
+    assert status == 200, f"expected 200, got {status}: {body}"
+    assert "alternatives" not in body, f"unexpected alternatives: {body}"
+    status_zero, body_zero = request(
+        "POST", "/recover", {**valid_payload(), "alternative_limit": 0}
+    )
+    assert status_zero == 200
+    assert body_zero == body, "alternative_limit=0 must match the default response"
+
+
+def check_alternatives_ranked_by_score_then_code() -> None:
+    status, body = request(
+        "POST", "/recover", {**valid_payload(), "alternative_limit": 4}
+    )
+    assert status == 200, f"expected 200, got {status}: {body}"
+    alternatives = body["alternatives"]
+    assert [a["code"] for a in alternatives] == [
+        "BC13567899",
+        "AD13567899",
+        "BD13567899",
+    ], alternatives
+    previous = body["total_score"]
+    for alternative in alternatives:
+        assert alternative["total_score"] < previous
+        assert alternative["score_gap"] == body["total_score"] - alternative[
+            "total_score"
+        ]
+        assert [c["position"] for c in alternative["choices"]] == list(range(10))
+        previous = alternative["total_score"]
+
+
+def check_alternatives_order_invariant() -> None:
+    payload = valid_payload()
+    shuffled = valid_payload()
+    for position in shuffled["positions"]:
+        position["candidates"].reverse()
+    _, first = request("POST", "/recover", {**payload, "alternative_limit": 4})
+    status, second = request("POST", "/recover", {**shuffled, "alternative_limit": 4})
+    assert status == 200
+    assert first == second, "candidate order changed the ranked alternatives"
+
+
+def check_alternatives_truncated_to_available() -> None:
+    payload = valid_payload()
+    # 固定第 0 位后合法编码只有两个，limit=4 只返回一个备选。
+    payload["positions"][0]["candidates"] = [{"char": "A", "confidence": 90}]
+    status, body = request("POST", "/recover", {**payload, "alternative_limit": 4})
+    assert status == 200, f"expected 200, got {status}: {body}"
+    assert [a["code"] for a in body["alternatives"]] == ["AD13567899"]
+
+
+def check_invalid_alternative_limit_rejected() -> None:
+    for limit in (-1, 5, 1.5, "2"):
+        status, body = request(
+            "POST", "/recover", {**valid_payload(), "alternative_limit": limit}
+        )
+        assert status == 422, f"limit {limit!r}: expected 422, got {status}: {body}"
+        assert body["detail"][0]["reason"], f"limit {limit!r}: missing reason"
+
+
+
 def check_too_few_positions() -> None:
     payload = valid_payload()
     payload["positions"] = payload["positions"][:9]
@@ -161,6 +224,11 @@ CHECKS: list[tuple[str, Callable[[], None]]] = [
     ("candidate order does not change the label", check_candidate_order_invariance),
     ("ties break to lexicographically smallest code", check_tie_break),
     ("no valid combination returns 422", check_no_valid_combination),
+    ("default response omits alternatives", check_default_response_has_no_alternatives),
+    ("alternatives ranked by total score then code", check_alternatives_ranked_by_score_then_code),
+    ("alternatives are candidate-order invariant", check_alternatives_order_invariant),
+    ("alternatives truncated when legal results are few", check_alternatives_truncated_to_available),
+    ("invalid alternative_limit rejected with 422", check_invalid_alternative_limit_rejected),
     ("fewer than ten positions rejected", check_too_few_positions),
     ("wrong character class rejected with position", check_wrong_character_class),
     ("duplicate candidate chars rejected with position", check_duplicate_candidate_chars),
