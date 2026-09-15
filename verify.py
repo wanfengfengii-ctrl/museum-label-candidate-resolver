@@ -170,6 +170,11 @@ def check_alternatives_truncated_to_available() -> None:
     status, body = request("POST", "/recover", {**payload, "alternative_limit": 4})
     assert status == 200, f"expected 200, got {status}: {body}"
     assert [a["code"] for a in body["alternatives"]] == ["AD13567899"]
+    # 再固定第 1 位后只剩一个合法编码，请求备选时返回空列表而非缺省字段。
+    payload["positions"][1]["candidates"] = [{"char": "C", "confidence": 95}]
+    status, body = request("POST", "/recover", {**payload, "alternative_limit": 3})
+    assert status == 200, f"expected 200, got {status}: {body}"
+    assert body["alternatives"] == [], f"expected empty alternatives, got {body}"
 
 
 def check_invalid_alternative_limit_rejected() -> None:

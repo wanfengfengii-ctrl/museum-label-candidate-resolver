@@ -26,4 +26,6 @@ def recover_label(request: RecoverRequest) -> RecoverResponse:
             "no candidate combination satisfies the code format and checksum"
         )
     best, alternatives = ranked[0], ranked[1:]
-    return build_response(best, alternatives)
+    return build_response(
+        best, alternatives, include_alternatives=request.alternative_limit > 0
+    )

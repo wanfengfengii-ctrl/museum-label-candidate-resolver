@@ -109,7 +109,7 @@ def test_alternatives_truncated_to_available_results(
     only_one = copy.deepcopy(reduced)
     only_one["positions"][1]["candidates"] = [{"char": "C", "confidence": 95}]
     body = client.post("/recover", json={**only_one, "alternative_limit": 3}).json()
-    assert "alternatives" not in body
+    assert body["alternatives"] == []
 
 
 @pytest.mark.parametrize("limit", [-1, 5, 1.5, "2", True, None, "x"])
