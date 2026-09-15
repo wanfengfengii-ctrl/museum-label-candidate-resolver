@@ -44,7 +44,10 @@ def build_aligned_response(
     ignored = [
         IgnoredFragmentOut(
             source_index=source_index,
-            candidates=list(fragments[source_index].candidates),
+            # 按字符规范化候选顺序，使结果与请求中的候选排列无关。
+            candidates=sorted(
+                fragments[source_index].candidates, key=lambda candidate: candidate.char
+            ),
         )
         for source_index in alignment.ignored_sources
     ]

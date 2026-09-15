@@ -210,6 +210,63 @@ def test_errors_sort_null_position_first(client: TestClient) -> None:
     assert [detail["position"] for detail in response.json()["detail"]] == [None, 2, 6]
 
 
+def test_underfull_count_and_illegal_candidate_are_reported_together(
+    client: TestClient,
+) -> None:
+    payload = single_candidate_fragments("AC00390")
+    payload["fragments"][3]["candidates"][0]["char"] = "a"
+    response = client.post("/recover-aligned", json=payload)
+    assert response.status_code == 422
+    positions = [detail["position"] for detail in response.json()["detail"]]
+    # 数量不足（无源位置）与候选非法一次报全，无需先修字符再被告知数量。
+    assert positions == [None, 3]
+
+
+def test_overlong_count_and_illegal_candidates_are_reported_together(
+    client: TestClient,
+) -> None:
+    payload = single_candidate_fragments("A" + "0" * 12)
+    payload["fragments"][3]["candidates"][0]["char"] = "a"
+    payload["fragments"][11]["candidates"][0]["char"] = "b"
+    response = client.post("/recover-aligned", json=payload)
+    assert response.status_code == 422
+    positions = [detail["position"] for detail in response.json()["detail"]]
+    assert positions == [None, 3, 11]
+
+
+def test_count_error_is_not_duplicated(client: TestClient) -> None:
+    for count in (7, 13):
+        response = client.post(
+            "/recover-aligned", json=single_candidate_fragments("1" * count)
+        )
+        assert response.status_code == 422
+        assert len(response.json()["detail"]) == 1
+        assert response.json()["detail"][0]["position"] is None
+
+
+def test_ignored_fragment_candidates_are_candidate_order_invariant(
+    client: TestClient,
+) -> None:
+    def payload(order: list[tuple[str, int]]) -> dict:
+        fragments = single_candidate_fragments("AC13567899")["fragments"]
+        fragments.insert(
+            4, {"candidates": [{"char": ch, "confidence": cf} for ch, cf in order]}
+        )
+        return {"fragments": fragments}
+
+    first = client.post(
+        "/recover-aligned", json=payload([("X", 90), ("0", 10)])
+    ).json()
+    second = client.post(
+        "/recover-aligned", json=payload([("0", 10), ("X", 90)])
+    ).json()
+    assert first == second
+    assert first["ignored_fragments"][0]["candidates"] == [
+        {"char": "0", "confidence": 10},
+        {"char": "X", "confidence": 90},
+    ]
+
+
 def test_alternative_limit_is_not_accepted(client: TestClient) -> None:
     payload = single_candidate_fragments("AC0039070")
     payload["alternative_limit"] = 2

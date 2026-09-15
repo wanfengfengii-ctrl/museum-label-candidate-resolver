@@ -13,7 +13,15 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+from pydantic_core import InitErrorDetails
 
 from app.checksum import CODE_LENGTH, LETTER_POSITIONS
 
@@ -143,6 +151,88 @@ class RecoverAlignedRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     fragments: list[Fragment] = Field(min_length=MIN_FRAGMENTS, max_length=MAX_FRAGMENTS)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _merge_count_and_item_errors(
+        cls, data: object, handler: object
+    ) -> RecoverAlignedRequest:
+        # Pydantic 在列表长度越界时会吞掉片段内的候选错误（超长时尤甚，
+        # 且原生长度错误还会重复两次），这里合并长度错误与每个片段的候选
+        # 错误，去重后一次报全。
+        raw = data.get("fragments") if isinstance(data, dict) else None
+        count = len(raw) if isinstance(raw, list) else None
+        try:
+            return handler(data)  # type: ignore[misc]
+        except ValidationError as exc:
+            if count is None or MIN_FRAGMENTS <= count <= MAX_FRAGMENTS:
+                raise
+            line_errors: list[InitErrorDetails] = []
+            seen: set[tuple[str, tuple[object, ...]]] = set()
+
+            def add(
+                error_type: str,
+                loc: tuple[object, ...],
+                *,
+                input_value: object = None,
+                ctx: dict[str, object] | None = None,
+                include_input: bool = False,
+            ) -> None:
+                key = (error_type, loc)
+                if key in seen:
+                    return
+                seen.add(key)
+                detail: InitErrorDetails = {"type": error_type, "loc": loc}  # type: ignore[typeddict-item]
+                if include_input:
+                    detail["input"] = input_value
+                if ctx:
+                    detail["ctx"] = ctx  # type: ignore[typeddict-item]
+                line_errors.append(detail)
+
+            # 1) 保留原生的顶层错误（如多余字段 alternative_limit）；片段
+            #    条目级错误全部由下一步逐片段校验重新产出，避免重复。
+            for error in exc.errors():
+                loc = tuple(error["loc"])
+                if loc[:1] == ("fragments",):
+                    continue
+                add(
+                    error["type"],
+                    loc,
+                    input_value=error.get("input"),
+                    ctx=error.get("ctx"),
+                    include_input="input" in error,
+                )
+
+            # 2) 逐个片段自行校验：超长列表时原生校验会跳过条目。
+            for index, item in enumerate(raw):  # type: ignore[union-attr]
+                try:
+                    Fragment.model_validate(item)
+                except ValidationError as item_exc:
+                    for error in item_exc.errors():
+                        add(
+                            error["type"],
+                            ("fragments", index, *error["loc"]),
+                            input_value=error.get("input"),
+                            ctx=error.get("ctx"),
+                            include_input="input" in error,
+                        )
+
+            # 3) 恰好一条长度错误（position 为 null）。
+            add(
+                "too_short" if count < MIN_FRAGMENTS else "too_long",
+                ("fragments",),
+                input_value=raw,
+                ctx={
+                    "field_type": "List",
+                    "min_length": MIN_FRAGMENTS,
+                    "max_length": MAX_FRAGMENTS,
+                    "actual_length": count,
+                },
+                include_input=True,
+            )
+            raise ValidationError.from_exception_data(
+                cls.__name__, line_errors
+            ) from exc
 
 
 class AlignedMatchOut(BaseModel):

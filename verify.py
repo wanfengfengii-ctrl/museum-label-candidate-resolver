@@ -344,6 +344,33 @@ def check_recover_contract_still_compatible() -> None:
     assert "alternatives" not in body
 
 
+def check_aligned_count_and_character_errors_reported_together() -> None:
+    # 七个片段且含小写候选：数量不足与字符非法必须一次报全（null 在前）。
+    payload = aligned_fragments("AC00390")
+    payload["fragments"][3]["candidates"][0]["char"] = "a"
+    status, body = request("POST", "/recover-aligned", payload)
+    assert status == 422, f"expected 422, got {status}: {body}"
+    assert [detail["position"] for detail in body["detail"]] == [None, 3], body
+
+
+def check_aligned_ignored_fragment_order_invariant() -> None:
+    def payload(order: list[tuple[str, int]]) -> dict[str, Any]:
+        data = aligned_fragments("AC13567899")
+        data["fragments"].insert(
+            4, {"candidates": [{"char": ch, "confidence": cf} for ch, cf in order]}
+        )
+        return data
+
+    _, first = request(
+        "POST", "/recover-aligned", payload([("X", 90), ("0", 10)])
+    )
+    status, second = request(
+        "POST", "/recover-aligned", payload([("0", 10), ("X", 90)])
+    )
+    assert status == 200
+    assert first == second, "ignored fragment order must be candidate-order invariant"
+
+
 CHECKS: list[tuple[str, Callable[[], None]]] = [
     ("health endpoint", check_health),
     ("happy path recovers expected label", check_happy_path),
@@ -366,6 +393,8 @@ CHECKS: list[tuple[str, Callable[[], None]]] = [
     ("aligned: mapping is candidate-order deterministic", check_aligned_deterministic_mapping),
     ("aligned: no legal alignment returns reason", check_aligned_no_solution_returns_reason),
     ("aligned: invalid fragment count or candidate rejected", check_aligned_validation_422),
+    ("aligned: count and character errors reported together", check_aligned_count_and_character_errors_reported_together),
+    ("aligned: ignored fragment order is invariant", check_aligned_ignored_fragment_order_invariant),
     ("original /recover contract stays compatible", check_recover_contract_still_compatible),
 ]
 
