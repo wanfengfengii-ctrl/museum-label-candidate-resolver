@@ -1,0 +1,26 @@
+name: label-recovery
+
+services:
+  api:
+    build: .
+    image: label-recovery-api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  verify:
+    image: label-recovery-api
+    build: .
+    profiles: ["verify"]
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      API_BASE_URL: http://api:8000
+    command: ["python", "verify.py"]
+    restart: "no"
