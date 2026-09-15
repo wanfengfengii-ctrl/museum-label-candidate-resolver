@@ -23,11 +23,22 @@ class NoValidCombinationError(Exception):
 
 def _position_from_loc(loc: Sequence[Any]) -> int | None:
     for index, part in enumerate(loc):
-        if part == "positions" and index + 1 < len(loc):
+        if part in ("positions", "fragments") and index + 1 < len(loc):
             following = loc[index + 1]
             if isinstance(following, int):
                 return following
     return None
+
+
+def _sort_details(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # 无源位置项在前，其余按源位置升序；同位置保持原有相对顺序。
+    details.sort(
+        key=lambda detail: (
+            1 if detail["position"] is not None else 0,
+            detail["position"] if detail["position"] is not None else 0,
+        )
+    )
+    return details
 
 
 def _format_validation_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
@@ -47,8 +58,13 @@ def _format_validation_errors(exc: RequestValidationError) -> list[dict[str, Any
 async def _handle_validation_error(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
+    details = _format_validation_errors(exc)
+    # /recover-aligned 的 422 约定：无源位置项在前，其余按源位置升序；
+    # /recover 保持原有错误顺序不变。
+    if request.url.path == "/recover-aligned":
+        _sort_details(details)
     return JSONResponse(
-        status_code=422, content={"detail": _format_validation_errors(exc)}
+        status_code=422, content={"detail": details}
     )
 
 

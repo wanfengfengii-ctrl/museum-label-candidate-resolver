@@ -36,12 +36,13 @@ OCR 识别磨损的馆藏标签时，常在相似字形之间给出多个候选�
 
 | 模块 | 职责 |
 | ---- | ---- |
-| `app/schemas.py` | 请求约束（Pydantic）：十个位置、每处 1–3 个不重复候选、置信度 0–100 整数、逐位字符类别、备选上限 0–4 |
+| `app/schemas.py` | 请求约束（Pydantic）：十个位置、每处 1–3 个不重复候选、置信度 0–100 整数、逐位字符类别、备选上限 0–4；对齐入口的 8–12 片段与 `A-Z`/`0-9` 候选约束 |
 | `app/solver.py` | 搜索：穷举候选组合并筛出合法标签，按排名返回首选与备选 |
+| `app/alignment.py` | 全局对齐 DP：源下标/目标位/编辑数/校验余数状态，匹配、忽略、补位三转移，最多两次编辑 |
 | `app/checksum.py` | 校验与排序：校验式、编码格式检查、排名键（总分降序、编码字典序） |
-| `app/response.py` | 响应组装：编码、总分、逐位选择、备选分差 |
-| `app/errors.py` | 错误处理：422 响应统一指出位置与原因 |
-| `app/main.py` | FastAPI 应用与路由 |
+| `app/response.py` | 响应组装：编码、总分、逐位选择、备选分差、对齐映射与被忽略片段 |
+| `app/errors.py` | 错误处理：422 响应统一指出位置与原因；对齐入口按无源位置在前、源位置升序排列 |
+| `app/main.py` | FastAPI 应用与路由（`/recover`、`/recover-aligned`） |
 
 ## API
 
@@ -133,6 +134,79 @@ OCR 识别磨损的馆藏标签时，常在相似字形之间给出多个候选�
 `alternative_limit` 类型或范围错误（非整数、小于 0、大于 4）在进入求解
 流程前即返回 `422`；无合法组合时无论上限为何，仍保持原有 `422` 语义。
 
+### `POST /recover-aligned`
+
+设备偶尔会**漏掉一位**（收到少于十个片段）或把**污点识别成多余片段**
+（收到多于十个）。本入口接收 **8 至 12 个 OCR 片段**，复用同样的候选
+结构（每处 1–3 个不重复候选、置信度 0–100 整数），但片段尚未对齐到
+目标位，因此候选字符允许大写 `A-Z` **或** 数字 `0-9`，是否符合某一
+目标位的类别由求解器判定。本入口**不接受** `alternative_limit`。
+
+```json
+{
+  "fragments": [
+    {"candidates": [{"char": "A", "confidence": 90}]},
+    {"candidates": [{"char": "C", "confidence": 95}]},
+    {"candidates": [{"char": "0", "confidence": 60}, {"char": "O", "confidence": 9}]},
+    {"candidates": [{"char": "0", "confidence": 71}]},
+    {"candidates": [{"char": "3", "confidence": 88}]},
+    {"candidates": [{"char": "9", "confidence": 64}]},
+    {"candidates": [{"char": "0", "confidence": 77}]},
+    {"candidates": [{"char": "7", "confidence": 80}]},
+    {"candidates": [{"char": "0", "confidence": 59}]}
+  ]
+}
+```
+
+求解器以“源下标、目标位、已用编辑数、校验余数”为状态做动态规划，
+三种转移为：
+
+1. **匹配**：源片段的某候选符合目标位类别（校验位还须满足校验式）；
+2. **忽略源片段**：视为污点，计一次编辑；
+3. **补位目标位**：漏读位零置信度补位，计一次编辑；补位字符同样参与
+   字符类别与校验计算（校验位由数据位余数唯一确定）。
+
+最多两次编辑。**十个源片段时仅在零编辑无解后**才允许“一次忽略加一次
+补位”的错位修复；八个或十二个片段则分别对应至多两次补位或忽略。
+
+排名顺序（保证唯一结果，与候选在片段内的排列次序无关）：
+
+1. 编辑次数最少；
+2. 匹配置信度总和最高；
+3. 完整编码字典序最小；
+4. “目标位 → 源下标”映射字典序最小，**补位在映射比较中排在所有源
+   索引之后**。
+
+成功响应 `200` 给出编码、得分、编辑次数、每个目标位对应的源片段
+（补位为 `source_index: null`、`confidence: 0`）以及被忽略的源片段
+（按源下标升序，并附上各自的候选）：
+
+```json
+{
+  "code": "AC00339070",
+  "total_score": 684,
+  "edits": 1,
+  "matches": [
+    {"position": 0, "char": "A", "confidence": 90, "source_index": 0},
+    {"position": 1, "char": "C", "confidence": 95, "source_index": 1},
+    {"position": 2, "char": "0", "confidence": 60, "source_index": 2},
+    {"position": 3, "char": "0", "confidence": 71, "source_index": 3},
+    {"position": 4, "char": "3", "confidence": 88, "source_index": 4},
+    {"position": 5, "char": "3", "confidence": 0, "source_index": null},
+    {"position": 6, "char": "9", "confidence": 64, "source_index": 5},
+    {"position": 7, "char": "0", "confidence": 77, "source_index": 6},
+    {"position": 8, "char": "7", "confidence": 80, "source_index": 7},
+    {"position": 9, "char": "0", "confidence": 59, "source_index": 8}
+  ],
+  "ignored_fragments": []
+}
+```
+
+两次编辑内不存在合法对齐时返回 `422`，`position` 为 `null` 并给出
+无结果原因。片段数越界（少于 8 或多于 12）、候选字符不属于
+`A-Z`/`0-9`、候选数越界、重复或置信度非法时同样整体拒绝；本入口的
+422 列表中**无源位置项排在最前，其余按源位置升序**排列。
+
 ### 错误响应 `422`
 
 以下情况整体拒绝，错误指出位置（`position`，从 0 计）与原因（`reason`）：
@@ -180,7 +254,9 @@ API_PORT=9000 docker compose up --build   # 宿主 9000 端口
 
 一次性验收服务 `verify` 位于独立 profile，不影响默认启动；它等待 API
 健康后执行全部验收场景（合法恢复、次序无关、同分字典序、有限备选、
-备选截断、非法上限、各类 422），全部通过时以退出码 0 结束：
+备选截断、非法上限、各类 422，以及全局对齐的中间漏位补位、高分污点
+忽略、十片段错位修复、编辑优先级、确定性映射与无解原因），全部通过时
+以退出码 0 结束：
 
 ```bash
 docker compose --profile verify up --build --abort-on-container-exit verify
@@ -199,4 +275,7 @@ pytest
 ```
 
 测试覆盖：校验式与格式检查、最优解选择、同分字典序、候选次序无关性、
-高置信度诱饵校验位、无合法组合 422，以及全部请求约束的 422 行为。
+高置信度诱饵校验位、无合法组合 422，以及全部请求约束的 422 行为；
+全局对齐覆盖精确对齐、中间漏位补位、高分污点忽略、十片段错位修复、
+编辑最少优先于得分、确定性映射（补位最后）、候选排列不变性、无解
+422 原因以及片段数/字符/置信度约束。

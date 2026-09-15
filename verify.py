@@ -223,6 +223,127 @@ def check_confidence_out_of_range() -> None:
     assert body["detail"][0]["position"] == 3
 
 
+def aligned_fragments(chars: str, confidence: int = 50) -> dict[str, Any]:
+    return {
+        "fragments": [
+            {"candidates": [{"char": ch, "confidence": confidence}]} for ch in chars
+        ]
+    }
+
+
+def check_aligned_middle_gap() -> None:
+    # AC00339070 漏掉第 5 位的 '3'：九个片段须在目标位 5 零置信度补位。
+    status, body = request("POST", "/recover-aligned", aligned_fragments("AC0039070"))
+    assert status == 200, f"expected 200, got {status}: {body}"
+    assert body["code"] == "AC00339070", body
+    assert body["edits"] == 1
+    assert body["ignored_fragments"] == []
+    fill = body["matches"][5]
+    assert fill == {"position": 5, "char": "3", "confidence": 0, "source_index": None}
+    assert body["matches"][6]["source_index"] == 5
+    assert sum(m["confidence"] for m in body["matches"]) == body["total_score"]
+
+
+def check_aligned_extra_high_confidence_smudge() -> None:
+    payload = aligned_fragments("AC13567899")
+    payload["fragments"].insert(4, {"candidates": [{"char": "0", "confidence": 100}]})
+    status, body = request("POST", "/recover-aligned", payload)
+    assert status == 200, f"expected 200, got {status}: {body}"
+    assert body["code"] == "AC13567899", body
+    assert body["edits"] == 1
+    assert body["ignored_fragments"] == [
+        {"source_index": 4, "candidates": [{"char": "0", "confidence": 100}]}
+    ]
+    # 高分污点被忽略：得分不含它的 100，且不改变标签。
+    assert body["total_score"] == 500
+    assert body["matches"][4]["source_index"] == 5
+
+
+def check_aligned_ten_fragment_shift_repair() -> None:
+    # 十个片段：第 8 个是字母污点 X、校验位漏读，须“一次忽略 + 一次补位”。
+    chars = list("AC000000")
+    chars.insert(8, "X")
+    chars.append("0")
+    status, body = request(
+        "POST", "/recover-aligned", aligned_fragments("".join(chars))
+    )
+    assert status == 200, f"expected 200, got {status}: {body}"
+    assert body["code"] == "AC00000000", body
+    assert body["edits"] == 2
+    assert [i["source_index"] for i in body["ignored_fragments"]] == [8]
+    fill = body["matches"][9]
+    assert fill["source_index"] is None and fill["char"] == "0"
+
+
+def check_aligned_zero_edits_preferred_over_score() -> None:
+    # 直连合法时，即使忽略+补位能凑出更高分，也必须保持零编辑。
+    payload = aligned_fragments("AC13567899")
+    payload["fragments"][2] = {
+        "candidates": [
+            {"char": "1", "confidence": 5},
+            {"char": "2", "confidence": 95},
+        ]
+    }
+    status, body = request("POST", "/recover-aligned", payload)
+    assert status == 200, f"expected 200, got {status}: {body}"
+    assert body["edits"] == 0
+    assert body["code"] == "AC13567899"
+
+
+def check_aligned_deterministic_mapping() -> None:
+    payload = {
+        "fragments": [
+            {"candidates": [{"char": "A", "confidence": 90}, {"char": "B", "confidence": 80}]},
+            {"candidates": [{"char": "C", "confidence": 95}, {"char": "D", "confidence": 70}]},
+        ]
+        + [{"candidates": [{"char": ch, "confidence": 50}]} for ch in "0039070"]
+    }
+    shuffled = json.loads(json.dumps(payload))
+    for fragment in shuffled["fragments"]:
+        fragment["candidates"].reverse()
+    _, first = request("POST", "/recover-aligned", payload)
+    status, second = request("POST", "/recover-aligned", shuffled)
+    assert status == 200
+    assert first == second, "candidate permutation changed the alignment"
+
+
+def check_aligned_no_solution_returns_reason() -> None:
+    status, body = request("POST", "/recover-aligned", aligned_fragments("11111111"))
+    assert status == 422, f"expected 422, got {status}: {body}"
+    detail = body["detail"][0]
+    assert detail["position"] is None
+    assert detail["reason"], "missing no-result reason"
+
+
+def check_aligned_validation_422() -> None:
+    # 片段数越界。
+    for count in (7, 13):
+        status, body = request(
+            "POST", "/recover-aligned", aligned_fragments("1" * count)
+        )
+        assert status == 422, f"{count} fragments: expected 422, got {status}: {body}"
+    # 候选字符非法（小写字母）。
+    payload = aligned_fragments("AC0039070")
+    payload["fragments"][3]["candidates"][0]["char"] = "a"
+    status, body = request("POST", "/recover-aligned", payload)
+    assert status == 422, f"expected 422, got {status}: {body}"
+    assert body["detail"][0]["position"] == 3
+    # 新入口不接受备选上限。
+    payload = aligned_fragments("AC0039070")
+    payload["alternative_limit"] = 2
+    status, body = request("POST", "/recover-aligned", payload)
+    assert status == 422, f"expected 422, got {status}: {body}"
+    assert body["detail"][0]["position"] is None
+
+
+def check_recover_contract_still_compatible() -> None:
+    status, body = request("POST", "/recover", valid_payload())
+    assert status == 200
+    assert body["code"] == EXPECTED_CODE
+    assert body["total_score"] == EXPECTED_TOTAL_SCORE
+    assert "alternatives" not in body
+
+
 CHECKS: list[tuple[str, Callable[[], None]]] = [
     ("health endpoint", check_health),
     ("happy path recovers expected label", check_happy_path),
@@ -238,6 +359,14 @@ CHECKS: list[tuple[str, Callable[[], None]]] = [
     ("wrong character class rejected with position", check_wrong_character_class),
     ("duplicate candidate chars rejected with position", check_duplicate_candidate_chars),
     ("confidence out of range rejected with position", check_confidence_out_of_range),
+    ("aligned: middle gap recovered with zero-confidence fill", check_aligned_middle_gap),
+    ("aligned: extra high-confidence smudge ignored", check_aligned_extra_high_confidence_smudge),
+    ("aligned: ten-fragment shift repaired with ignore plus fill", check_aligned_ten_fragment_shift_repair),
+    ("aligned: zero edits preferred over higher edited score", check_aligned_zero_edits_preferred_over_score),
+    ("aligned: mapping is candidate-order deterministic", check_aligned_deterministic_mapping),
+    ("aligned: no legal alignment returns reason", check_aligned_no_solution_returns_reason),
+    ("aligned: invalid fragment count or candidate rejected", check_aligned_validation_422),
+    ("original /recover contract stays compatible", check_recover_contract_still_compatible),
 ]
 
 

@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from app.schemas import AlternativeOut, ChoiceOut, RecoverResponse
+from app.alignment import Alignment
+from app.schemas import (
+    AlignedMatchOut,
+    AlternativeOut,
+    ChoiceOut,
+    IgnoredFragmentOut,
+    Position,
+    RecoverAlignedResponse,
+    RecoverResponse,
+)
 from app.solver import Solution
 
 
@@ -17,6 +26,35 @@ def _build_choices(solution: Solution) -> list[ChoiceOut]:
         )
         for choice in solution.choices
     ]
+
+
+def build_aligned_response(
+    alignment: Alignment, fragments: Sequence[Position]
+) -> RecoverAlignedResponse:
+    """组装全局对齐响应：逐目标位来源（补位 source_index 为 null）与被忽略片段。"""
+    matches = [
+        AlignedMatchOut(
+            position=match.position,
+            char=match.char,
+            confidence=match.confidence,
+            source_index=match.source_index,
+        )
+        for match in alignment.matches
+    ]
+    ignored = [
+        IgnoredFragmentOut(
+            source_index=source_index,
+            candidates=list(fragments[source_index].candidates),
+        )
+        for source_index in alignment.ignored_sources
+    ]
+    return RecoverAlignedResponse(
+        code=alignment.code,
+        total_score=alignment.total_score,
+        edits=alignment.edits,
+        matches=matches,
+        ignored_fragments=ignored,
+    )
 
 
 def build_response(
